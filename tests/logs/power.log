@@ -1,0 +1,20 @@
+2025-07-30 10:41:10,719 - INFO - test_ble_reconect:26 - 日志系统已通过配置文件初始化
+2025-07-30 10:41:10,719 - INFO - test_ble_reconect:43 - 初始化设备控制器，初始状态: IDLE
+2025-07-30 10:41:10,719 - INFO - test_ble_reconect:55 - 状态转换成功: IDLE -> SLEEP
+2025-07-30 10:44:44,436 - INFO - test_ble_reconect:26 - 日志系统已通过配置文件初始化
+2025-07-30 10:44:44,436 - INFO - test_ble_reconect:43 - 初始化设备控制器，初始状态: IDLE
+2025-07-30 10:44:44,437 - INFO - test_ble_reconect:55 - 状态转换成功: IDLE -> SLEEP
+2025-07-30 10:45:02,822 - INFO - test_ble_reconect:26 - 日志系统已通过配置文件初始化
+2025-07-30 10:45:02,823 - INFO - test_ble_reconect:43 - 初始化设备控制器，初始状态: IDLE
+2025-07-30 10:45:02,824 - INFO - test_ble_reconect:55 - 状态转换成功: IDLE -> SLEEP
+2025-07-30 10:45:05,429 - INFO - test_ble_reconect:26 - 日志系统已通过配置文件初始化
+2025-07-30 10:45:05,429 - INFO - test_ble_reconect:43 - 初始化设备控制器，初始状态: IDLE
+2025-07-30 10:45:05,430 - INFO - test_ble_reconect:55 - 状态转换成功: IDLE -> SLEEP
+2025-07-30 10:49:59,734 - INFO - test_ble_reconect:26 - 日志系统已通过配置文件初始化
+2025-07-30 10:49:59,735 - INFO - test_ble_reconect:43 - 初始化设备控制器，初始状态: IDLE
+2025-07-30 10:49:59,735 - INFO - test_ble_reconect:55 - 状态转换成功: IDLE -> SLEEP
+2025-07-30 10:49:59,735 - DEBUG - test_ble_reconect:56 - this debugIDLE -> SLEEP
+2025-07-31 10:10:43,556 - INFO - test_ble_reconect:28 - 日志系统已通过配置文件初始化
+2025-07-31 10:10:43,556 - INFO - test_ble_reconect:45 - 初始化设备控制器，初始状态: IDLE
+2025-07-31 10:10:43,556 - INFO - test_ble_reconect:57 - 状态转换成功: IDLE -> SLEEP
+2025-07-31 10:10:43,556 - DEBUG - test_ble_reconect:58 - this debugIDLE -> SLEEP
