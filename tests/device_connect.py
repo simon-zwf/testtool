@@ -30,6 +30,7 @@ class SerialTerminal:
         self.listen_thread = None    # 监控线程引用
 
     def open(self):
+        """打开串口，创建Serial对象"""
         self.ser = serial.Serial(
             port=self.port,
             baudrate=self.baudrate,
@@ -39,17 +40,19 @@ class SerialTerminal:
         print(f"[ok] Serial opened: {self.port}, @{self.baudrate}")
 
     def _listen(self):
+        """私有方法，用来后台监控串口子线程运行"""
         while not self.stop_event.is_set():
             try:
                 data = self.ser.read(1024)
                 if data:
-                    decoded = data.decode(errors="ignore")
-                    print(decoded, end="", flush=True)
+                    decoded = data.decode(errors="ignore") # 忽略非法字符，防止乱码导致解码崩溃
+                    print(decoded, end="", flush=True)   # 原样输出，不加换行
             except Exception as e:
                 print(f"\n[ERR] listen error: {e}")
                 break
 
     def start(self):
+        """启动监听线程，守护线程"""
         if not self.ser:
             self.open()
         self.listen_thread = threading.Thread(target=self._listen, daemon=True)
@@ -57,30 +60,30 @@ class SerialTerminal:
 
     def write(self, text):
         if not text.endswith("\n"):
-            text += "\n"
+            text += "\n"   # 自动补换行，以\n结束
         try:
-            self.ser.write(text.encode())
-            self.ser.flush()
+            self.ser.write(text.encode())   # 转换成bytes格式发送
+            self.ser.flush()   # 立即刷缓冲区
         except Exception as e:
             print(f"[ERR] write failed: {e}")
 
     def close(self):
-        self.stop_event.set()
+        self.stop_event.set()   # 通知监控线程停止
         try:
             if self.ser:
-                self.ser.cancel_read()
+                self.ser.cancel_read()  # 取消可能阻塞的read
                 self.ser.close()
         except Exception as e:
             print(f"[WARN] close serial exception: {e}")
 
         if self.listen_thread and self.listen_thread.is_alive():
-            self.listen_thread.join(timeout=1)
+            self.listen_thread.join(timeout=1)   # 待定线程结束
 
 if __name__ == "__main__":
     port = "COM7"
     baud = 921600
     terminal = SerialTerminal(port, baud)
-    terminal.start()
+    terminal.start()  # 启动监控线程
 
     try:
         # 让主线程等待，避免立即退出
