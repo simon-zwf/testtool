@@ -1,350 +1,627 @@
-import asyncio
 import sys
+import asyncio
 import json
+from datetime import datetime
+from typing import List, Dict, Any
+
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QPushButton, QListWidget, QTreeWidget,
+                             QTreeWidgetItem, QTextEdit, QLabel, QSplitter,
+                             QTabWidget, QGroupBox, QLineEdit, QMessageBox,
+                             QProgressBar, QComboBox, QTableWidget, QTableWidgetItem,
+                             QHeaderView, QFormLayout, QFrame, QDialog, QStackedWidget)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
+from PyQt5.QtGui import QFont, QColor
+
+import bleak
 from bleak import BleakScanner, BleakClient
-from bleak.backends.scanner import AdvertisementData
-from bleak.backends.device import BLEDevice
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QLabel, QComboBox,
-                             QGroupBox, QSplitter, QFileDialog, QMessageBox, QStatusBar)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QTextCursor
-
-# 默认测试用例
-DEFAULT_TEST_CASES = [
-    {
-        "name": "广播数据包长度",
-        "manufacturer_id": 0x042,  # Google Company ID
-        "manufacturer_data": "09020430141000006F041FDADA7F017E58AE93CD8F16030335FD",
-        "expect": "18FF4209020430141000006F030BE4E47F01F44EFD00001110030335FD"
-    },
-    # 其他测试用例...
-]
+from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.backends.service import BleakGATTService
 
 
-class BLEBroadcastWorker(QThread):
-    """BLE广播工作线程"""
-    log_signal = pyqtSignal(str)
-    status_signal = pyqtSignal(str)
-    result_signal = pyqtSignal(str, bool, str)
+class BLEWorker(QThread):
+    """异步BLE操作的工作线程"""
+    device_discovered = pyqtSignal(dict)
+    scan_completed = pyqtSignal()
+    connected = pyqtSignal(bool)
+    services_discovered = pyqtSignal(list)
+    data_received = pyqtSignal(str, bytes)
+    log_message = pyqtSignal(str)
 
-    def __init__(self, test_cases, device_name_filter="", scan_timeout=10):
-        super().__init__()
-        self.test_cases = test_cases
-        self.device_name_filter = device_name_filter
-        self.scan_timeout = scan_timeout
-        self.is_running = False
-
-    def run(self):
-        self.is_running = True
-        asyncio.run(self.run_broadcast_tests())
-
-    async def run_broadcast_tests(self):
-        """运行所有广播测试"""
-        for test_case in self.test_cases:
-            if not self.is_running:
-                break
-
-            self.log_signal.emit(f"开始测试: {test_case['name']}")
-            self.status_signal.emit(f"正在测试: {test_case['name']}")
-
-            # 扫描设备并检查广播数据
-            received_data = await self.scan_for_broadcasts(test_case)
-
-            # 检查结果
-            expected_data = test_case['expect'].replace(' ', '').upper()
-            if received_data:
-                self.log_signal.emit(f"接收到数据: {received_data}")
-                self.log_signal.emit(f"期望数据: {expected_data}")
-
-                # 比较接收到的数据和期望数据
-                if received_data == expected_data:
-                    self.log_signal.emit("✓ 测试通过")
-                    self.result_signal.emit(test_case['name'], True, received_data)
-                else:
-                    self.log_signal.emit("✗ 测试失败 - 数据不匹配")
-                    self.result_signal.emit(test_case['name'], False, received_data)
-            else:
-                self.log_signal.emit("✗ 测试失败 - 未接收到数据")
-                self.result_signal.emit(test_case['name'], False, "")
-
-            await asyncio.sleep(2)  # 测试间隔
-
-        self.status_signal.emit("测试完成")
-        self.log_signal.emit("=== 所有测试完成 ===")
-
-    async def scan_for_broadcasts(self, test_case):
-        """扫描特定格式的广播数据"""
-        received_data = None
-        manufacturer_id = test_case.get('manufacturer_id', 0x042)  # 默认Google Company ID
-
-        def callback(device: BLEDevice, advertisement_data: AdvertisementData):
-            nonlocal received_data
-            # 检查设备名称过滤
-            if self.device_name_filter and not (device.name and self.device_name_filter in device.name):
-                return
-
-            # 检查制造商数据
-            if advertisement_data.manufacturer_data:
-                for mid, data in advertisement_data.manufacturer_data.items():
-                    if mid == manufacturer_id:
-                        hex_data = data.hex().upper()
-                        self.log_signal.emit(f"发现匹配的制造商数据: {hex_data}")
-                        received_data = hex_data
-                        break
-
-        scanner = BleakScanner(callback)
-        await scanner.start()
-
-        # 等待指定时间或直到收到数据
-        for _ in range(self.scan_timeout * 10):  # 每0.1秒检查一次
-            if received_data or not self.is_running:
-                break
-            await asyncio.sleep(0.1)
-
-        await scanner.stop()
-        return received_data
-
-    def stop(self):
-        self.is_running = False
-
-
-class BLEBroadcastWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.test_cases = DEFAULT_TEST_CASES.copy()
-        self.worker = None
+        self.scanner = None
+        self.client = None
+        self.devices = {}
+        self.is_scanning = False
+
+    def scan_devices(self):
+        self.is_scanning = True
+        self.start()
+
+    def stop_scan(self):
+        self.is_scanning = False
+
+    def connect_device(self, address):
+        self.address = address
+        self.start()
+
+    def disconnect_device(self):
+        if self.client and self.client.is_connected:
+            self.start()
+
+    def read_characteristic(self, service_uuid, char_uuid):
+        self.service_uuid = service_uuid
+        self.char_uuid = char_uuid
+        self.start()
+
+    def write_characteristic(self, service_uuid, char_uuid, data):
+        self.service_uuid = service_uuid
+        self.char_uuid = char_uuid
+        self.write_data = data
+        self.start()
+
+    def run(self):
+        if hasattr(self, 'address'):
+            asyncio.run(self._connect_device())
+        elif hasattr(self, 'service_uuid'):
+            if hasattr(self, 'write_data'):
+                asyncio.run(self._write_characteristic())
+            else:
+                asyncio.run(self._read_characteristic())
+        else:
+            asyncio.run(self._scan_devices())
+
+    async def _scan_devices(self):
+        """扫描BLE设备"""
+        try:
+            self.log_message.emit("开始扫描BLE设备...")
+
+            def detection_callback(device, advertisement_data):
+                if device.address not in self.devices:
+                    device_info = {
+                        'name': device.name or "Unknown",
+                        'address': device.address,
+                        'rssi': device.rssi,
+                        'advertisement_data': advertisement_data,
+                        'details': str(advertisement_data)
+                    }
+                    self.devices[device.address] = device_info
+                    self.device_discovered.emit(device_info)
+
+            self.scanner = BleakScanner(detection_callback=detection_callback)
+            await self.scanner.start()
+
+            # 扫描10秒
+            await asyncio.sleep(10)
+            await self.scanner.stop()
+
+            self.log_message.emit(f"扫描完成，发现 {len(self.devices)} 个设备")
+            self.scan_completed.emit()
+
+        except Exception as e:
+            self.log_message.emit(f"扫描错误: {str(e)}")
+
+    async def _connect_device(self):
+        """连接设备并发现服务"""
+        try:
+            self.log_message.emit(f"正在连接设备: {self.address}")
+            self.client = BleakClient(self.address)
+
+            await self.client.connect()
+            self.log_message.emit("连接成功！")
+
+            # 获取服务
+            services = await self.client.get_services()
+            services_list = []
+
+            for service in services:
+                service_info = {
+                    'uuid': service.uuid,
+                    'handle': service.handle,
+                    'description': str(service),
+                    'characteristics': []
+                }
+
+                for char in service.characteristics:
+                    char_info = {
+                        'uuid': char.uuid,
+                        'handle': char.handle,
+                        'properties': char.properties,
+                        'description': str(char)
+                    }
+                    service_info['characteristics'].append(char_info)
+
+                services_list.append(service_info)
+
+            self.services_discovered.emit(services_list)
+            self.connected.emit(True)
+
+        except Exception as e:
+            self.log_message.emit(f"连接错误: {str(e)}")
+            self.connected.emit(False)
+
+    async def _read_characteristic(self):
+        """读取特征值"""
+        try:
+            if self.client and self.client.is_connected:
+                data = await self.client.read_gatt_char(self.char_uuid)
+                self.data_received.emit('read', data)
+                self.log_message.emit(f"读取成功: {data.hex()}")
+        except Exception as e:
+            self.log_message.emit(f"读取错误: {str(e)}")
+
+    async def _write_characteristic(self):
+        """写入特征值"""
+        try:
+            if self.client and self.client.is_connected:
+                # 尝试将输入转换为字节
+                if isinstance(self.write_data, str):
+                    if self.write_data.startswith('0x'):
+                        data = bytes.fromhex(self.write_data[2:])
+                    else:
+                        data = self.write_data.encode('utf-8')
+                else:
+                    data = self.write_data
+
+                await self.client.write_gatt_char(self.char_uuid, data)
+                self.log_message.emit(f"写入成功: {data.hex()}")
+        except Exception as e:
+            self.log_message.emit(f"写入错误: {str(e)}")
+
+
+class CharacteristicWidget(QWidget):
+    """特征操作界面"""
+    readRequested = pyqtSignal(str, str)  # service_uuid, char_uuid
+    writeRequested = pyqtSignal(str, str, bytes)  # service_uuid, char_uuid, data
+
+    def __init__(self, char_info, service_uuid):
+        super().__init__()
+        self.char_info = char_info
+        self.service_uuid = service_uuid
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle('BLE广播测试工具')
-        self.setGeometry(100, 100, 1000, 700)
+        layout = QVBoxLayout()
+
+        # 特征信息
+        info_group = QGroupBox("特征信息")
+        info_layout = QFormLayout()
+
+        info_layout.addRow("UUID:", QLabel(self.char_info['uuid']))
+        info_layout.addRow("Handle:", QLabel(str(self.char_info['handle'])))
+        info_layout.addRow("属性:", QLabel(', '.join(self.char_info['properties'])))
+
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+
+        # 读取操作
+        if 'read' in self.char_info['properties']:
+            read_group = QGroupBox("读取数据")
+            read_layout = QVBoxLayout()
+
+            self.read_result = QTextEdit()
+            self.read_result.setReadOnly(True)
+            self.read_result.setMaximumHeight(100)
+
+            read_btn = QPushButton("读取")
+            read_btn.clicked.connect(self.on_read)
+
+            read_layout.addWidget(self.read_result)
+            read_layout.addWidget(read_btn)
+            read_group.setLayout(read_layout)
+            layout.addWidget(read_group)
+
+        # 写入操作
+        if 'write' in self.char_info['properties'] or 'write-without-response' in self.char_info['properties']:
+            write_group = QGroupBox("写入数据")
+            write_layout = QVBoxLayout()
+
+            format_label = QLabel("格式:")
+            self.format_combo = QComboBox()
+            self.format_combo.addItems(["文本", "十六进制", "十进制"])
+            self.format_combo.currentTextChanged.connect(self.on_format_changed)
+
+            self.write_input = QLineEdit()
+            self.write_input.setPlaceholderText("输入要写入的数据")
+
+            format_layout = QHBoxLayout()
+            format_layout.addWidget(format_label)
+            format_layout.addWidget(self.format_combo)
+
+            write_btn = QPushButton("写入")
+            write_btn.clicked.connect(self.on_write)
+
+            write_layout.addLayout(format_layout)
+            write_layout.addWidget(QLabel("数据:"))
+            write_layout.addWidget(self.write_input)
+            write_layout.addWidget(write_btn)
+            write_group.setLayout(write_layout)
+            layout.addWidget(write_group)
+
+        layout.addStretch()
+        self.setLayout(layout)
+
+    def on_read(self):
+        """发送读取请求"""
+        self.readRequested.emit(self.service_uuid, self.char_info['uuid'])
+
+    def on_write(self):
+        """发送写入请求"""
+        text = self.write_input.text().strip()
+        if not text:
+            return
+
+        data = None
+        format_type = self.format_combo.currentText()
+
+        try:
+            if format_type == "十六进制":
+                # 移除0x前缀和空格
+                hex_str = text.replace('0x', '').replace(' ', '')
+                data = bytes.fromhex(hex_str)
+            elif format_type == "十进制":
+                # 以逗号分隔的数字
+                numbers = [int(x.strip()) for x in text.split(',')]
+                data = bytes(numbers)
+            else:  # 文本
+                data = text.encode('utf-8')
+
+            if data:
+                self.writeRequested.emit(self.service_uuid, self.char_info['uuid'], data)
+        except Exception as e:
+            print(f"数据格式错误: {e}")
+
+    def on_format_changed(self, text):
+        """更改数据格式时更新提示文本"""
+        if text == "十六进制":
+            self.write_input.setPlaceholderText("例如: 0x01 0x02 0x03 或 010203")
+        elif text == "十进制":
+            self.write_input.setPlaceholderText("例如: 1, 2, 3, 255")
+        else:
+            self.write_input.setPlaceholderText("输入要写入的文本")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.ble_worker = BLEWorker()
+        self.current_device = None
+        self.current_characteristic = None
+        self.current_service_uuid = None
+        self.init_ui()
+        self.connect_signals()
+
+    def init_ui(self):
+        self.setWindowTitle("BLE Connect Tool - 类似nRF Connect")
+        self.setGeometry(100, 100, 1200, 800)
 
         # 中央部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         # 主布局
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout()
+        central_widget.setLayout(main_layout)
 
-        # 控制面板
-        control_group = QGroupBox("控制面板")
-        control_layout = QHBoxLayout(control_group)
+        # 左侧面板 - 设备列表
+        left_panel = QWidget()
+        left_layout = QVBoxLayout()
 
-        self.device_filter_edit = QLineEdit()
-        self.device_filter_edit.setPlaceholderText("设备名称过滤器 (可选)")
-        control_layout.addWidget(QLabel("设备过滤器:"))
-        control_layout.addWidget(self.device_filter_edit)
+        # 扫描控制
+        scan_group = QGroupBox("设备扫描")
+        scan_layout = QVBoxLayout()
 
-        self.timeout_edit = QLineEdit("10")
-        self.timeout_edit.setMaximumWidth(50)
-        control_layout.addWidget(QLabel("超时(秒):"))
-        control_layout.addWidget(self.timeout_edit)
-
-        self.start_btn = QPushButton("开始扫描")
-        self.start_btn.clicked.connect(self.start_scan)
-        control_layout.addWidget(self.start_btn)
+        self.scan_btn = QPushButton("开始扫描")
+        self.scan_btn.clicked.connect(self.start_scan)
 
         self.stop_btn = QPushButton("停止扫描")
         self.stop_btn.clicked.connect(self.stop_scan)
         self.stop_btn.setEnabled(False)
-        control_layout.addWidget(self.stop_btn)
 
-        main_layout.addWidget(control_group)
+        self.device_list = QListWidget()
+        self.device_list.itemClicked.connect(self.on_device_selected)
 
-        # 测试用例区域
-        test_case_group = QGroupBox("测试用例配置")
-        test_case_layout = QVBoxLayout(test_case_group)
+        scan_layout.addWidget(self.scan_btn)
+        scan_layout.addWidget(self.stop_btn)
+        scan_layout.addWidget(QLabel("设备列表:"))
+        scan_layout.addWidget(self.device_list)
+        scan_group.setLayout(scan_layout)
+        left_layout.addWidget(scan_group)
 
-        self.test_case_combo = QComboBox()
-        self.update_test_case_combo()
-        self.test_case_combo.currentIndexChanged.connect(self.load_test_case)
-        test_case_layout.addWidget(self.test_case_combo)
+        # 设备信息
+        info_group = QGroupBox("设备信息")
+        info_layout = QFormLayout()
 
-        # 制造商ID和数据编辑
-        id_data_layout = QHBoxLayout()
+        self.device_name_label = QLabel("-")
+        self.device_address_label = QLabel("-")
+        self.device_rssi_label = QLabel("-")
 
-        id_group = QGroupBox("制造商ID")
-        id_layout = QVBoxLayout(id_group)
-        self.manufacturer_id_edit = QLineEdit("66")  # 0x42 = 66
-        id_layout.addWidget(self.manufacturer_id_edit)
+        info_layout.addRow("名称:", self.device_name_label)
+        info_layout.addRow("地址:", self.device_address_label)
+        info_layout.addRow("信号强度:", self.device_rssi_label)
 
-        data_group = QGroupBox("制造商数据")
-        data_layout = QVBoxLayout(data_group)
-        self.manufacturer_data_edit = QTextEdit()
-        data_layout.addWidget(self.manufacturer_data_edit)
+        info_group.setLayout(info_layout)
+        left_layout.addWidget(info_group)
 
-        id_data_layout.addWidget(id_group)
-        id_data_layout.addWidget(data_group)
-        test_case_layout.addLayout(id_data_layout)
+        # 设备操作按钮
+        btn_group = QWidget()
+        btn_layout = QHBoxLayout()
 
-        # 期望结果编辑
-        expect_group = QGroupBox("期望结果")
-        expect_layout = QVBoxLayout(expect_group)
-        self.expect_edit = QTextEdit()
-        expect_layout.addWidget(self.expect_edit)
+        self.advertise_btn = QPushButton("查看广播信息")
+        self.advertise_btn.clicked.connect(self.show_advertisement)
+        self.advertise_btn.setEnabled(False)
 
-        test_case_layout.addWidget(expect_group)
+        self.connect_btn = QPushButton("连接设备")
+        self.connect_btn.clicked.connect(self.connect_device)
+        self.connect_btn.setEnabled(False)
 
-        # 测试用例操作按钮
-        test_case_btn_layout = QHBoxLayout()
-        self.add_btn = QPushButton("添加测试用例")
-        self.add_btn.clicked.connect(self.add_test_case)
-        test_case_btn_layout.addWidget(self.add_btn)
+        self.disconnect_btn = QPushButton("断开连接")
+        self.disconnect_btn.clicked.connect(self.disconnect_device)
+        self.disconnect_btn.setEnabled(False)
 
-        self.update_btn = QPushButton("更新测试用例")
-        self.update_btn.clicked.connect(self.update_test_case)
-        test_case_btn_layout.addWidget(self.update_btn)
+        btn_layout.addWidget(self.advertise_btn)
+        btn_layout.addWidget(self.connect_btn)
+        btn_layout.addWidget(self.disconnect_btn)
+        btn_group.setLayout(btn_layout)
+        left_layout.addWidget(btn_group)
 
-        self.delete_btn = QPushButton("删除测试用例")
-        self.delete_btn.clicked.connect(self.delete_test_case)
-        test_case_btn_layout.addWidget(self.delete_btn)
+        left_panel.setLayout(left_layout)
+        left_panel.setMinimumWidth(350)
 
-        test_case_layout.addLayout(test_case_btn_layout)
+        # 右侧面板 - 服务和特征
+        right_panel = QWidget()
+        right_layout = QVBoxLayout()
 
-        main_layout.addWidget(test_case_group)
+        # 标签页
+        self.tab_widget = QTabWidget()
 
-        # 日志区域
-        log_group = QGroupBox("扫描日志")
-        log_layout = QVBoxLayout(log_group)
-        self.log_edit = QTextEdit()
-        self.log_edit.setReadOnly(True)
-        log_layout.addWidget(self.log_edit)
+        # 服务标签页
+        self.services_tree = QTreeWidget()
+        self.services_tree.setHeaderLabels(["UUID", "句柄", "描述"])
+        self.services_tree.itemClicked.connect(self.on_service_selected)
 
-        main_layout.addWidget(log_group)
+        # 特征标签页
+        self.char_tab = QWidget()
+        char_layout = QVBoxLayout()
+        self.char_stack = QStackedWidget()
+        char_layout.addWidget(self.char_stack)
+        self.char_tab.setLayout(char_layout)
+
+        # 日志标签页
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+
+        self.tab_widget.addTab(self.services_tree, "服务")
+        self.tab_widget.addTab(self.char_tab, "特征操作")
+        self.tab_widget.addTab(self.log_text, "日志")
+
+        right_layout.addWidget(self.tab_widget)
+        right_panel.setLayout(right_layout)
+
+        # 分割器
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setSizes([400, 800])
+
+        main_layout.addWidget(splitter)
 
         # 状态栏
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
-        self.statusBar.showMessage("就绪")
+        self.statusBar().showMessage("就绪")
 
-    def update_test_case_combo(self):
-        self.test_case_combo.clear()
-        for i, test_case in enumerate(self.test_cases):
-            self.test_case_combo.addItem(f"{i + 1}. {test_case['name']}")
-
-    def load_test_case(self):
-        index = self.test_case_combo.currentIndex()
-        if 0 <= index < len(self.test_cases):
-            test_case = self.test_cases[index]
-            self.manufacturer_id_edit.setText(str(test_case.get('manufacturer_id', 66)))
-            self.manufacturer_data_edit.setPlainText(test_case.get('manufacturer_data', ''))
-            self.expect_edit.setPlainText(test_case.get('expect', ''))
-
-    def add_test_case(self):
-        name = f"测试用例 {len(self.test_cases) + 1}"
-        try:
-            manufacturer_id = int(self.manufacturer_id_edit.text())
-        except ValueError:
-            manufacturer_id = 66  # 默认Google Company ID
-
-        manufacturer_data = self.manufacturer_data_edit.toPlainText().strip()
-        expect_data = self.expect_edit.toPlainText().strip()
-
-        if not manufacturer_data or not expect_data:
-            QMessageBox.warning(self, "警告", "制造商数据和期望数据不能为空")
-            return
-
-        self.test_cases.append({
-            "name": name,
-            "manufacturer_id": manufacturer_id,
-            "manufacturer_data": manufacturer_data,
-            "expect": expect_data
-        })
-
-        self.update_test_case_combo()
-        self.test_case_combo.setCurrentIndex(len(self.test_cases) - 1)
-        self.log(f"已添加测试用例: {name}")
-
-    def update_test_case(self):
-        index = self.test_case_combo.currentIndex()
-        if index < 0 or index >= len(self.test_cases):
-            return
-
-        try:
-            manufacturer_id = int(self.manufacturer_id_edit.text())
-        except ValueError:
-            manufacturer_id = 66  # 默认Google Company ID
-
-        manufacturer_data = self.manufacturer_data_edit.toPlainText().strip()
-        expect_data = self.expect_edit.toPlainText().strip()
-
-        if not manufacturer_data or not expect_data:
-            QMessageBox.warning(self, "警告", "制造商数据和期望数据不能为空")
-            return
-
-        self.test_cases[index]['manufacturer_id'] = manufacturer_id
-        self.test_cases[index]['manufacturer_data'] = manufacturer_data
-        self.test_cases[index]['expect'] = expect_data
-
-        self.update_test_case_combo()
-        self.test_case_combo.setCurrentIndex(index)
-        self.log(f"已更新测试用例: {self.test_cases[index]['name']}")
-
-    def delete_test_case(self):
-        index = self.test_case_combo.currentIndex()
-        if index < 0 or index >= len(self.test_cases):
-            return
-
-        name = self.test_cases[index]['name']
-        self.test_cases.pop(index)
-
-        self.update_test_case_combo()
-        if self.test_cases:
-            self.test_case_combo.setCurrentIndex(0 if index == 0 else index - 1)
-        self.log(f"已删除测试用例: {name}")
+    def connect_signals(self):
+        """连接信号和槽"""
+        self.ble_worker.device_discovered.connect(self.add_device)
+        self.ble_worker.scan_completed.connect(self.on_scan_completed)
+        self.ble_worker.connected.connect(self.on_device_connected)
+        self.ble_worker.services_discovered.connect(self.show_services)
+        self.ble_worker.data_received.connect(self.on_data_received)
+        self.ble_worker.log_message.connect(self.log_message)
 
     def start_scan(self):
-        if self.worker and self.worker.isRunning():
-            return
-
-        device_filter = self.device_filter_edit.text().strip()
-        try:
-            timeout = int(self.timeout_edit.text())
-        except ValueError:
-            timeout = 10
-
-        self.worker = BLEBroadcastWorker(self.test_cases, device_filter, timeout)
-        self.worker.log_signal.connect(self.log)
-        self.worker.status_signal.connect(self.statusBar.showMessage)
-        self.worker.result_signal.connect(self.handle_test_result)
-        self.worker.finished.connect(self.scan_finished)
-
-        self.start_btn.setEnabled(False)
+        """开始扫描"""
+        self.device_list.clear()
+        self.scan_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-
-        self.log("=== 开始扫描 ===")
-        self.worker.start()
+        self.log_message("开始扫描BLE设备...")
+        self.ble_worker.scan_devices()
 
     def stop_scan(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait()
-
-    def scan_finished(self):
-        self.start_btn.setEnabled(True)
+        """停止扫描"""
+        self.ble_worker.stop_scan()
+        self.scan_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.statusBar.showMessage("扫描完成")
+        self.log_message("扫描已停止")
 
-    def handle_test_result(self, test_name, passed, received_data):
-        color = "green" if passed else "red"
-        self.log(f"<font color='{color}'>测试结果: {test_name} - {'通过' if passed else '失败'}</font>")
+    def on_scan_completed(self):
+        """扫描完成后的处理"""
+        self.scan_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.log_message(f"扫描完成，共发现 {self.device_list.count()} 个设备")
 
-    def log(self, message):
-        self.log_edit.append(message)
-        self.log_edit.moveCursor(QTextCursor.End)
+    def add_device(self, device_info):
+        """添加设备到列表"""
+        name = device_info['name']
+        address = device_info['address']
+        rssi = device_info['rssi']
 
-    def closeEvent(self, event):
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait()
-        event.accept()
+        # 按RSSI强度排序插入
+        item_text = f"{name} ({address}) RSSI: {rssi}"
+
+        # 找到合适的位置插入
+        for i in range(self.device_list.count()):
+            item = self.device_list.item(i)
+            text = item.text()
+            # 提取现有的RSSI值
+            if "RSSI:" in text:
+                try:
+                    existing_rssi = int(text.split("RSSI:")[1].strip())
+                    if rssi > existing_rssi:  # RSSI越大信号越好
+                        self.device_list.insertItem(i, item_text)
+                        return
+                except:
+                    pass
+
+        # 如果没有找到合适位置，添加到末尾
+        self.device_list.addItem(item_text)
+
+    def on_device_selected(self, item):
+        """设备被选中"""
+        text = item.text()
+        # 从文本中提取地址
+        address_start = text.find('(') + 1
+        address_end = text.find(')')
+        address = text[address_start:address_end]
+
+        # 查找设备信息
+        for dev_info in self.ble_worker.devices.values():
+            if dev_info['address'] == address:
+                self.current_device = dev_info
+                self.update_device_info(dev_info)
+                break
+
+        self.advertise_btn.setEnabled(True)
+        self.connect_btn.setEnabled(True)
+        self.disconnect_btn.setEnabled(False)
+
+    def update_device_info(self, device_info):
+        """更新设备信息显示"""
+        self.device_name_label.setText(device_info['name'])
+        self.device_address_label.setText(device_info['address'])
+        self.device_rssi_label.setText(str(device_info['rssi']))
+
+    def show_advertisement(self):
+        """显示广播信息"""
+        if self.current_device:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("广播信息")
+            dialog.setGeometry(200, 200, 600, 400)
+
+            layout = QVBoxLayout()
+            text_edit = QTextEdit()
+            text_edit.setPlainText(self.current_device['details'])
+            text_edit.setReadOnly(True)
+
+            layout.addWidget(text_edit)
+            dialog.setLayout(layout)
+            dialog.exec_()
+
+    def connect_device(self):
+        """连接设备"""
+        if self.current_device:
+            self.log_message(f"正在连接设备: {self.current_device['address']}")
+            self.connect_btn.setEnabled(False)
+            self.disconnect_btn.setEnabled(True)
+            self.ble_worker.connect_device(self.current_device['address'])
+
+    def disconnect_device(self):
+        """断开设备连接"""
+        self.ble_worker.disconnect_device()
+        self.connect_btn.setEnabled(True)
+        self.disconnect_btn.setEnabled(False)
+        self.log_message("已断开连接")
+
+    def on_device_connected(self, success):
+        """设备连接结果"""
+        if success:
+            self.log_message("设备连接成功")
+            self.statusBar().showMessage("设备已连接")
+        else:
+            self.log_message("设备连接失败")
+            self.connect_btn.setEnabled(True)
+            self.disconnect_btn.setEnabled(False)
+
+    def show_services(self, services):
+        """显示服务"""
+        self.services_tree.clear()
+
+        for service in services:
+            service_item = QTreeWidgetItem([
+                service['uuid'],
+                str(service['handle']),
+                service['description']
+            ])
+            service_item.setData(0, Qt.UserRole, service)
+
+            for char in service['characteristics']:
+                char_item = QTreeWidgetItem([
+                    char['uuid'],
+                    str(char['handle']),
+                    ', '.join(char['properties'])
+                ])
+                char_item.setData(0, Qt.UserRole, {'char': char, 'service_uuid': service['uuid']})
+                service_item.addChild(char_item)
+
+            self.services_tree.addTopLevelItem(service_item)
+
+    def on_service_selected(self, item, column):
+        """服务或特征被选中"""
+        data = item.data(0, Qt.UserRole)
+        if data and 'char' in data:  # 这是特征
+            char_info = data['char']
+            service_uuid = data['service_uuid']
+            self.current_characteristic = char_info
+            self.current_service_uuid = service_uuid
+            self.show_characteristic_operations(char_info, service_uuid)
+
+    def show_characteristic_operations(self, char_info, service_uuid):
+        """显示特征操作界面"""
+        # 移除旧的widgets
+        while self.char_stack.count():
+            widget = self.char_stack.widget(0)
+            self.char_stack.removeWidget(widget)
+
+        # 添加新的操作界面
+        char_widget = CharacteristicWidget(char_info, service_uuid)
+        char_widget.readRequested.connect(self.on_read_characteristic)
+        char_widget.writeRequested.connect(self.on_write_characteristic)
+        self.char_stack.addWidget(char_widget)
+        self.tab_widget.setCurrentIndex(1)  # 切换到特征标签页
+
+    def on_read_characteristic(self, service_uuid, char_uuid):
+        """处理读取特征请求"""
+        self.ble_worker.read_characteristic(service_uuid, char_uuid)
+
+    def on_write_characteristic(self, service_uuid, char_uuid, data):
+        """处理写入特征请求"""
+        self.ble_worker.write_characteristic(service_uuid, char_uuid, data)
+
+    def on_data_received(self, operation, data):
+        """处理接收到的数据"""
+        if operation == 'read':
+            hex_str = data.hex()
+            ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)
+
+            result = f"HEX: {hex_str}\n"
+            result += f"ASCII: {ascii_str}\n"
+            result += f"长度: {len(data)} 字节"
+
+            # 在当前特征操作界面显示结果
+            current_widget = self.char_stack.currentWidget()
+            if current_widget and hasattr(current_widget, 'read_result'):
+                current_widget.read_result.setPlainText(result)
+
+            self.log_message(f"读取到数据: {hex_str}")
+
+    def log_message(self, message):
+        """记录日志"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.append(f"[{timestamp}] {message}")
+        self.statusBar().showMessage(message)
 
 
-if __name__ == '__main__':
+def main():
     app = QApplication(sys.argv)
-    window = BLEBroadcastWindow()
+
+    # 设置应用样式
+    app.setStyle('Fusion')
+
+    window = MainWindow()
     window.show()
+
     sys.exit(app.exec_())
 
 
+if __name__ == "__main__":
+    main()
